@@ -3,12 +3,12 @@
    one digicam look -> 3 shots -> photobooth paper card with date
    ============================================================ */
 
-import { FILTERS, applyFilterToCanvas } from './filters.js?v=5';
-import * as store from './storage.js?v=5';
-import { playShutter, playTimerTick, playSaved, setMuted, muted } from './audio.js?v=5';
+import { FILTERS, applyFilterToCanvas } from './filters.js?v=6';
+import * as store from './storage.js?v=6';
+import { playShutter, playTimerTick, playSaved, setMuted, muted } from './audio.js?v=6';
 
 /* build stamp — visible in the corner so stale tabs are obvious at a glance */
-const BUILD = 'v5';
+const BUILD = "v6";
 
 /* -------------- state -------------- */
 const state = {
@@ -181,17 +181,51 @@ function stageIsComplete(stage) {
   return transparent / Math.max(1, checked) < 0.02;
 }
 
+/** mean luminance of a horizontal band — averages grain away, unlike
+ *  per-pixel thresholds (which a noisy black band slips straight past) */
+function bandMeanLum(d, W, y0, y1, step = 4) {
+  let sum = 0, n = 0;
+  for (let y = Math.max(0, y0); y < y1; y += step) {
+    for (let x = 0; x < W; x += 61) {
+      const i = (y * W + x) * 4;
+      sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      n++;
+    }
+  }
+  return n ? sum / n : 0;
+}
+
+/**
+ * content check: on a healthy frame the top and bottom bands live in the
+ * same world. A half frame (the failure we're hunting) has a dead band
+ * while the other half is alive — whether it's transparent or opaque
+ * black, mean luminance over thousands of samples catches both, and
+ * per-shot randomness (always a different position each session) means
+ * it's a decoder race we simply retry through.
+ */
+function bandLooksAlive(d, W, H) {
+  const top = bandMeanLum(d, W, 0, Math.floor(H * 0.3));
+  const bottom = bandMeanLum(d, W, Math.floor(H * 0.7), H);
+  return !(top > 22 && bottom < top * 0.22);
+}
+
+function stageLooksSane(stage) {
+  const d = stage.getContext('2d', { willReadFrequently: true })
+    .getImageData(0, 0, stage.width, stage.height).data;
+  return bandLooksAlive(d, stage.width, stage.height);
+}
+
 async function grabFullFrame() {
-  for (let attempt = 1; attempt <= 4; attempt++) {
+  for (let attempt = 1; attempt <= 5; attempt++) {
     const stage = blitVideo();
-    if (stageIsComplete(stage)) {
-      if (attempt > 1) console.info(`[booth] frame decoded fully on attempt ${attempt}`);
+    if (stageIsComplete(stage) && stageLooksSane(stage)) {
+      if (attempt > 1) console.info(`[booth] clean frame on attempt ${attempt}`);
       return stage;
     }
-    console.warn(`[booth] partial frame on attempt ${attempt} — waiting for decoder…`);
-    await sleep(140);   // let the video decoder finish a complete frame
+    console.warn(`[booth] half frame on attempt ${attempt} — re-grabbing…`);
+    await sleep(150);   // let the decoder settle into a full frame
   }
-  console.error('[booth] frame never fully decoded after 4 attempts');
+  console.error('[booth] could not obtain a clean frame after 5 attempts');
   return blitVideo();   // best effort rather than nothing
 }
 
@@ -261,27 +295,15 @@ async function shootOne() {
 }
 
 /**
- * last line of defence: sample rows across the finished canvas. If the
- * lower band is uniformly black while the top isn't, something in the
- * graphics stack produced a half frame — rebuild from the untouched
- * capture via a pure pixel copy (no drawImage anywhere).
+ * last line of defence: compare band means across the finished canvas.
+ * If the lower band is dead while the top is alive, the graphics stack
+ * produced a half frame — rebuild from the untouched capture via a pure
+ * pixel copy (no drawImage anywhere).
  */
 function verifyFullFrame(canvas) {
   const W = canvas.width, H = canvas.height;
   const d = canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data;
-  const blackFrac = (y) => {
-    let black = 0, n = 0;
-    for (let x = 0; x < W; x += 61) {
-      const i = (y * W + x) * 4;
-      n++;
-      if (d[i] < 14 && d[i + 1] < 14 && d[i + 2] < 14) black++;
-    }
-    return black / n;
-  };
-  const at = (f) => blackFrac(Math.min(H - 1, Math.floor(H * f)));
-  const top = Math.max(at(0.1), at(0.35));
-  const bottom = Math.max(at(0.85), at(0.95));
-  return !(bottom > 0.95 && top < 0.9);
+  return bandLooksAlive(d, W, H);
 }
 
 /** pixel-exact copy — cannot crop, scale or leave gaps */
@@ -331,7 +353,17 @@ async function captureSession() {
     for (let n = 1; n <= 3; n++) {
       setProgress(n);
       await countdownTick(state.countdownSec);
-      shots.push(await shootOne());
+      let shot = await shootOne();
+      if (!verifyFullFrame(shot)) {
+        // paranoia net: re-take it. The failure is intermittent by nature,
+        // so a fresh grab almost always comes back whole.
+        console.warn(`[booth] shot ${n} incomplete — retaking`);
+        setProgress(n);
+        await sleep(300);
+        await countdownTick(Math.min(3, state.countdownSec));
+        shot = await shootOne();
+      }
+      shots.push(shot);
       setProgress(0);
       if (n < 3) await sleep(700);
     }
