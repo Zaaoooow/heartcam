@@ -98,6 +98,41 @@ function computeOutputSize() {
   return { W, H };
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Full-frame 1:1 blit — the dead-simple drawImage form that cannot
+ * leave gaps, scale wrong, or mis-crop. Mirror (selfie) applied here
+ * once; everything downstream works with a settled, opaque frame.
+ */
+function grabFullFrame() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const stage = document.createElement('canvas');
+  stage.width = vw; stage.height = vh;
+  const c = stage.getContext('2d');
+  if (state.facing === 'user') {
+    c.translate(vw, 0);
+    c.scale(-1, 1);
+  }
+  c.drawImage(video, 0, 0, vw, vh);
+  return stage;
+}
+
+/** center-crop a stage canvas to W×H via a source-rect draw (can't fail to cover) */
+function cropStage(stage, W, H) {
+  const out = document.createElement('canvas');
+  out.width = W; out.height = H;
+  const c = out.getContext('2d');
+  const vw = stage.width, vh = stage.height, AR = W / H;
+  let sw, sh;
+  if (vw / vh > AR) { sh = vh; sw = Math.min(vw, Math.round(vh * AR)); }
+  else { sw = vw; sh = Math.min(vh, Math.round(vw / AR)); }
+  const sx = (stage.width - sw) / 2;
+  const sy = (stage.height - sh) / 2;
+  c.drawImage(stage, sx, sy, sw, sh, 0, 0, W, H);
+  return out;
+}
+
 function torchAvailable() {
   return !!state.videoTrack?.getCapabilities?.()?.torch;
 }
@@ -164,44 +199,45 @@ async function doCapture() {
   shutterBtn.classList.add('cooling');
 
   try {
-    // 1) optional countdown
-    if (state.countdownSec > 0) await countdownTick(state.countdownSec);
-
-    // 2) preflash + torch & preview overlay
-    const hadTorch = await torch(true);
-    preflashOverlay();
-    await new Promise((r) => setTimeout(r, hadTorch ? 260 : 160));
-    await torch(false);
-
-    // 3) main flash + shutter sound
-    if (state.flash) flashOverlay();
-    playShutter();
-
-    // 4) grab frame
+    // 0) camera ready?
     const src = video;
     if (!src.videoWidth || !src.videoHeight) {
       toast('摄像头还没准备好，稍等一秒再按一次吧');
       return;
     }
+
+    // 1) optional countdown
+    if (state.countdownSec > 0) await countdownTick(state.countdownSec);
+
+    // 2) ignite the light FIRST and KEEP it burning through the grab
+    //    (this was the old bug: the LED was switched off before exposure)
+    let torchOn = false;
+    if (state.flash) {
+      torchOn = await torch(true);   // real hardware LED when the device has one
+      preflashOverlay();
+      await sleep(torchOn ? 320 : 170);
+    }
+
+    // 3) fire flash + shutter, grab the frame WHILE the light is still on
+    if (state.flash) flashOverlay(); // full-viewport white light
+    playShutter();
+    const stage = grabFullFrame();   // dead-simple 1:1 blit, cannot fail to cover
+    if (torchOn) await torch(false); // LED off only after the frame is captured
+
+    // 4) film lab
     const fEntry = FILTERS[state.filterIdx];
     const { W, H } = computeOutputSize();
-    const raw = document.createElement('canvas');
-    raw.width = W; raw.height = H;
-    const rctx = raw.getContext('2d');
-    rctx.translate(W, 0); rctx.scale(-1, 1);
-    const scale = Math.max(W / src.videoWidth, H / src.videoHeight);
-    const dw = src.videoWidth * scale, dh = src.videoHeight * scale;
-    rctx.drawImage(src, (W - dw) / 2, (H - dh) / 2, dw, dh);
-
-    // 5) film lab
+    const raw = cropStage(stage, W, H);
     const out = applyFilterToCanvas(raw, {
       filterEntry: fEntry,
       intensity: state.intensity,
       width: W, height: H,
-      mirror: false, // already mirrored at grab time
+      mirror: false, // mirrored at grab time
       starPoints: state.flash ? collectFlashPoints(W, H) : [],
       timestampOverride: computeStamp(fEntry.params),
     });
+
+    if (state.flash && !torchOn) toastOnce('torch', '本机没有硬件闪光灯 → 已用全屏白光补光 ✨');
 
     showCapturedPreview(out, fEntry);
   } catch (err) {
@@ -211,6 +247,13 @@ async function doCapture() {
     state.busy = false;
     shutterBtn.classList.remove('cooling');
   }
+}
+
+const _toastOnceSet = new Set();
+function toastOnce(key, text) {
+  if (_toastOnceSet.has(key)) return;
+  _toastOnceSet.add(key);
+  toast(text);
 }
 
 function showCapturedPreview(canvas, fEntry) {

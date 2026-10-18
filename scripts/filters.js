@@ -164,16 +164,30 @@ export function applyFilterToCanvas(source, opts) {
   out.width = W; out.height = H;
   const ctx = out.getContext('2d', { willReadFrequently: true });
 
+  /* opaque base FIRST — JPEG turns every transparent pixel black,
+     so the canvas must never have any */
+  ctx.fillStyle = '#241d22';
+  ctx.fillRect(0, 0, W, H);
+
+  /*
+   * center-crop via a SOURCE-RECT drawImage — the canonical form that
+   * cannot leave canvas rows unpainted (unlike dx,dy,dw,dh scaling),
+   * and rounding is clamped so the rect can never poke outside the
+   * source (which some browsers paint as nothing at all)
+   */
+  const srcW = src.videoWidth || src.naturalWidth || src.width;
+  const srcH = src.videoHeight || src.naturalHeight || src.height;
+  const outAR = W / H;
+  let sw, sh;
+  if (srcW / srcH > outAR) { sh = srcH; sw = Math.min(srcW, Math.round(srcH * outAR)); }
+  else { sw = srcW; sh = Math.min(srcH, Math.round(srcW / outAR)); }
+  const sx = (srcW - sw) / 2, sy = (srcH - sh) / 2;
+
   if (mirror) {
     ctx.translate(W, 0);
     ctx.scale(-1, 1);
   }
-  // cover-fit crop
-  const srcW = src.videoWidth || src.naturalWidth || src.width;
-  const srcH = src.videoHeight || src.naturalHeight || src.height;
-  const scale = Math.max(W / srcW, H / srcH);
-  const dw = srcW * scale, dh = srcH * scale;
-  ctx.drawImage(src, (W - dw) / 2, (H - dh) / 2, dw, dh);
+  ctx.drawImage(src, sx, sy, sw, sh, 0, 0, W, H);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 
   const k = intensity / 100;
@@ -224,7 +238,21 @@ export function applyFilterToCanvas(source, opts) {
     : pr.timestamp;
   if (ts) drawTimestamp(ctx, W, H, ts);
 
+  /* 12. final insurance: no transparent pixels can ever survive,
+     so JPEG export can never show black bars */
+  forceOpaque(ctx, W, H);
+
   return out;
+}
+
+function forceOpaque(ctx, W, H) {
+  const img = ctx.getImageData(0, 0, W, H);
+  const d = img.data;
+  let touched = false;
+  for (let i = 3; i < d.length; i += 4) {
+    if (d[i] !== 255) { d[i] = 255; touched = true; }
+  }
+  if (touched) ctx.putImageData(img, 0, 0);
 }
 
 /* ------------------- individual steps ------------------- */

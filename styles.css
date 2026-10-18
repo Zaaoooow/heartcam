@@ -162,13 +162,22 @@ body {
 }
 
 /* flash */
-#flash-effect-overlay, #pre-flash-effect-overlay {
+/* pre-flash: timing cue inside the viewfinder */
+#pre-flash-effect-overlay {
   position: absolute; inset: 0; background: #fff; opacity: 0;
   pointer-events: none;
 }
-#flash-effect-overlay.fire { animation: flashFire 0.75s ease-out; }
+/* main flash: FULL viewport — it's the actual light source when
+   the device has no hardware LED */
+#flash-effect-overlay {
+  position: fixed; inset: 0;
+  z-index: 120;                 /* above everything, even the preview card */
+  background: #fff; opacity: 0;
+  pointer-events: none;
+}
+#flash-effect-overlay.fire { animation: flashFire 0.8s ease-out; }
 #pre-flash-effect-overlay.fire { animation: preFlashFire 0.3s ease-in; }
-@keyframes flashFire { 0% { opacity: 0.96; } 100% { opacity: 0; } }
+@keyframes flashFire { 0% { opacity: 0.98; } 100% { opacity: 0; } }
 @keyframes preFlashFire { 0% { opacity: 0; } 45% { opacity: 0.5; } 100% { opacity: 0; } }
 
 /* shutter button */
