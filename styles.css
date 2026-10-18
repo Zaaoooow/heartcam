@@ -423,6 +423,34 @@ body {
 }
 .lightbox-actions { display: flex; gap: 14px; }
 
+/* ---------- filter switch (RAW / DIGICAM, floats over viewfinder) ---------- */
+#filter-switch {
+  position: absolute; left: 12px; top: 12px;
+  z-index: 5;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.filter-chip {
+  font-family: var(--font-body);
+  border: 2px solid rgba(255, 255, 255, 0.55);
+  background: rgba(30, 22, 30, 0.35);
+  backdrop-filter: blur(6px);
+  color: #fff;
+  border-radius: 999px;
+  padding: 6px 13px;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  line-height: 1.25;
+  transition: all 0.2s;
+}
+.filter-chip .en { display: block; font-size: 9px; opacity: 0.72; letter-spacing: 0.5px; }
+.filter-chip:hover { border-color: var(--pink); transform: translateX(3px); }
+.filter-chip.active {
+  background: linear-gradient(180deg, var(--pink), var(--pink-deep));
+  border-color: #fff;
+  box-shadow: 0 4px 14px rgba(232, 95, 140, 0.5);
+}
+
 /* ---------- build badge (staleness detector) ---------- */
 #build-badge {
   position: fixed;
@@ -481,5 +509,8 @@ body {
   .hud-pill span { display: none; }
   .hud-pill svg { width: 20px; height: 20px; }
   #countdown-value { font-size: 96px; }
+  #filter-switch { gap: 5px; }
+  .filter-chip { font-size: 11px; padding: 4px 9px; }
+  .filter-chip .en { display: none; }
   .about-card { padding: 24px 20px; font-size: 14px; }
 }
