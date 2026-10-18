@@ -423,6 +423,21 @@ body {
 }
 .lightbox-actions { display: flex; gap: 14px; }
 
+/* ---------- build badge (staleness detector) ---------- */
+#build-badge {
+  position: fixed;
+  left: 10px; bottom: 8px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--border-dashed);
+  background: rgba(255, 253, 249, 0.75);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  z-index: 40;
+  user-select: none;
+}
+
 /* ---------- tagline + shot progress ---------- */
 #tagline {
   text-align: center;

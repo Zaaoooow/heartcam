@@ -3,9 +3,12 @@
    one digicam look -> 3 shots -> photobooth paper card with date
    ============================================================ */
 
-import { FILTERS, applyFilterToCanvas } from './filters.js';
-import * as store from './storage.js';
-import { playShutter, playTimerTick, playSaved, setMuted, muted } from './audio.js';
+import { FILTERS, applyFilterToCanvas } from './filters.js?v=5';
+import * as store from './storage.js?v=5';
+import { playShutter, playTimerTick, playSaved, setMuted, muted } from './audio.js?v=5';
+
+/* build stamp — visible in the corner so stale tabs are obvious at a glance */
+const BUILD = 'v5';
 
 /* -------------- state -------------- */
 const state = {
@@ -245,7 +248,7 @@ async function shootOne() {
   const raw = cropStage(stage, W, H);
   toastOnce('torch', '本机没有硬件闪光灯 → 用了全屏白光补光 ✨');
 
-  return applyFilterToCanvas(raw, {
+  const shot = applyFilterToCanvas(raw, {
     filterEntry: DIGI,
     intensity: 100,
     width: W, height: H,
@@ -253,6 +256,62 @@ async function shootOne() {
     starPoints: state.flash ? collectFlashPoints() : [],
     timestampOverride: false, // the date lives on the paper card, not per-photo
   });
+
+  return verifyFullFrame(shot) ? shot : rebuildExact(raw, W, H);
+}
+
+/**
+ * last line of defence: sample rows across the finished canvas. If the
+ * lower band is uniformly black while the top isn't, something in the
+ * graphics stack produced a half frame — rebuild from the untouched
+ * capture via a pure pixel copy (no drawImage anywhere).
+ */
+function verifyFullFrame(canvas) {
+  const W = canvas.width, H = canvas.height;
+  const d = canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data;
+  const blackFrac = (y) => {
+    let black = 0, n = 0;
+    for (let x = 0; x < W; x += 61) {
+      const i = (y * W + x) * 4;
+      n++;
+      if (d[i] < 14 && d[i + 1] < 14 && d[i + 2] < 14) black++;
+    }
+    return black / n;
+  };
+  const at = (f) => blackFrac(Math.min(H - 1, Math.floor(H * f)));
+  const top = Math.max(at(0.1), at(0.35));
+  const bottom = Math.max(at(0.85), at(0.95));
+  return !(bottom > 0.95 && top < 0.9);
+}
+
+/** pixel-exact copy — cannot crop, scale or leave gaps */
+function copyExact(srcCanvas, W, H) {
+  const out = document.createElement('canvas');
+  out.width = W; out.height = H;
+  const octx = out.getContext('2d', { willReadFrequently: true });
+  octx.putImageData(
+    srcCanvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H),
+    0, 0,
+  );
+  return out;
+}
+
+function rebuildExact(raw, W, H) {
+  console.warn('[booth] pipeline output incomplete — rebuilding pixel-exact');
+  const base = copyExact(raw, W, H);
+  const out = applyFilterToCanvas(base, {
+    filterEntry: DIGI,
+    intensity: 100,
+    width: W, height: H,
+    mirror: false,
+    starPoints: [],
+    timestampOverride: false,
+  });
+  if (!verifyFullFrame(out)) {
+    console.warn('[booth] second pass incomplete — shipping pixel-exact capture');
+    return base;
+  }
+  return out;
 }
 
 function setProgress(n) {
@@ -563,5 +622,6 @@ function toastOnce(key, text) {
 /* ============================================================
    intro
    ============================================================ */
+$('build-badge').textContent = `build ${BUILD}`;
 openCamera();
-console.log('♥ digibooth ready — one look, three shots, one paper card');
+console.log(`♥ digibooth ${BUILD} — one look, three shots, one paper card`);
