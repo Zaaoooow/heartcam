@@ -104,7 +104,7 @@ body {
   object-fit: cover;
   display: block;
   transform: scaleX(-1);   /* mirror, like a handheld LCD */
-  filter: saturate(1.06) contrast(1.02) brightness(1.02);
+  filter: saturate(1.1) contrast(1.12) brightness(1.07) sepia(0.05); /* digicam tint */
 }
 
 #viewfinder-screen.tall    { aspect-ratio: 3 / 4; max-height: 70vh; }
@@ -423,45 +423,34 @@ body {
 }
 .lightbox-actions { display: flex; gap: 14px; }
 
-/* ---------- floating filter strip (over the viewfinder) ---------- */
-.filter-chip {
-  font-family: var(--font-body);
-  border: 2px solid rgba(255, 255, 255, 0.55);
-  background: rgba(30, 22, 30, 0.35);
+/* ---------- tagline + shot progress ---------- */
+#tagline {
+  text-align: center;
+  font-family: var(--font-hand);
+  font-size: 19px;
+  color: var(--pink-deep);
+  letter-spacing: 3px;
+  margin: -6px 0 14px;
+  opacity: 0.9;
+}
+#shot-progress-overlay {
+  position: absolute; top: 18px; left: 0; right: 0;
+  display: flex; justify-content: center;
+  pointer-events: none;
+  z-index: 6;
+}
+#shot-progress-text {
+  background: rgba(30, 22, 30, 0.55);
   backdrop-filter: blur(6px);
+  border: 2px solid rgba(255, 255, 255, 0.45);
   color: #fff;
+  font-family: var(--font-hand);
+  font-size: 22px;
+  letter-spacing: 2px;
+  padding: 8px 20px;
   border-radius: 999px;
-  padding: 6px 13px;
-  font-size: 13px;
-  cursor: pointer;
-  text-align: left;
-  line-height: 1.25;
-  transition: all 0.2s;
-}
-.filter-chip .en { display: block; font-size: 9px; opacity: 0.72; letter-spacing: 0.5px; }
-.filter-chip:hover { border-color: var(--pink); transform: translateX(3px); }
-.filter-chip.active {
-  background: linear-gradient(180deg, var(--pink), var(--pink-deep));
-  border-color: #fff;
-  box-shadow: 0 4px 14px rgba(232, 95, 140, 0.5);
-}
-.intensity-slider {
-  display: flex; align-items: center; gap: 8px;
-  background: rgba(30, 22, 30, 0.35);
-  border: 2px solid rgba(255, 255, 255, 0.35);
-  border-radius: 999px;
-  padding: 5px 12px;
-  backdrop-filter: blur(6px);
-  margin-top: 2px;
-}
-.intensity-slider label { color: #fff; font-size: 11px; }
-.intensity-slider input { width: 78px; accent-color: var(--pink); }
-
-@media (max-width: 640px) {
-  #filter-strip { gap: 5px; }
-  .filter-chip { font-size: 11px; padding: 4px 9px; }
-  .filter-chip .en { display: none; }
-  .intensity-slider input { width: 52px; }
+  box-shadow: 0 4px 14px rgba(232, 95, 140, 0.4);
+  animation: floaty 2.4s ease-in-out infinite;
 }
 
 /* ---------- mobile ---------- */

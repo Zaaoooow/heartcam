@@ -1,9 +1,9 @@
 /* ============================================================
-   app.js — 那些年 · 拍立得小站
-   camera -> filters (RAW->JPEG-ish CCD pipeline) -> polaroid album
+   app.js — 那些年 · 快拍三连（digicam photobooth）
+   one digicam look -> 3 shots -> photobooth paper card with date
    ============================================================ */
 
-import { FILTERS, applyFilterToCanvas, TIMESTAMP_DEFAULT } from './filters.js';
+import { FILTERS, applyFilterToCanvas } from './filters.js';
 import * as store from './storage.js';
 import { playShutter, playTimerTick, playSaved, setMuted, muted } from './audio.js';
 
@@ -14,15 +14,15 @@ const state = {
   facing: 'user',
   flash: true,
   countdownSec: 3,
-  timestampMode: 'auto',
   aspect: '4:3',
-  intensity: 100,
-  filterIdx: 0,
   busy: false,
   photos: [],
   activeCollection: 'all',
-  pendingPhoto: null,
+  pendingBlob: null,
 };
+
+/* the single look of the machine: the 2006 digicam recipe */
+const DIGI = FILTERS.find((f) => f.id === 'digicam') || FILTERS[0];
 
 /* -------------- dom shortcuts -------------- */
 const $ = (id) => document.getElementById(id);
@@ -33,6 +33,7 @@ const aboutScreen = $('about-screen');
 const viewfinderScreen = $('viewfinder-screen');
 const shutterBtn = $('shutter-button');
 const toastBox = $('toast-container');
+const shutterHUD = $('shutter-hud');
 
 /* ============================================================
    camera
@@ -63,19 +64,17 @@ async function openCamera(facing = state.facing) {
   } catch (err) {
     console.error('camera error', err);
     $('camera-loading-overlay').classList.add('hidden');
-    const errBox = $('camera-error-overlay');
     const msg = {
       NotAllowedError: '嗯…你没有给它摄像头权限。可以在浏览器地址栏重新允许，或者点下面再试一次。',
       NotFoundError: '好像找不到摄像头设备？换个设备试试看吧。',
       NotReadableError: '摄像头被其他程序占用啦，关掉再回来试试。',
     }[err.name] || '出现了一点问题，请检查摄像头再试试看。';
     $('camera-error-message').textContent = msg;
-    errBox.classList.remove('hidden');
+    $('camera-error-overlay').classList.remove('hidden');
   }
 }
 
 function updateSwitcherVisibility() {
-  // hide flip button on desktops that only expose one camera
   navigator.mediaDevices?.enumerateDevices?.().then((devs) => {
     const cams = devs.filter((d) => d.kind === 'videoinput');
     $('camera-switcher').classList.toggle('hidden', cams.length < 2);
@@ -83,11 +82,10 @@ function updateSwitcherVisibility() {
 }
 
 /* ============================================================
-   capture pipeline
+   capture pipeline (single shot building block)
    ============================================================ */
 
 function computeOutputSize() {
-  // pick source dimensions scaled toward ~1400px on the long edge
   const srcW = video.videoWidth || 1600;
   const srcH = video.videoHeight || 1200;
   const ratio = { '4:3': 4 / 3, '16:9': 16 / 9, '1:1': 1, '3:4': 3 / 4 }[state.aspect];
@@ -99,43 +97,6 @@ function computeOutputSize() {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-/**
- * Full-frame 1:1 blit — the dead-simple drawImage form that cannot
- * leave gaps, scale wrong, or mis-crop. Mirror (selfie) applied here
- * once; everything downstream works with a settled, opaque frame.
- */
-function grabFullFrame() {
-  const vw = video.videoWidth, vh = video.videoHeight;
-  const stage = document.createElement('canvas');
-  stage.width = vw; stage.height = vh;
-  const c = stage.getContext('2d');
-  if (state.facing === 'user') {
-    c.translate(vw, 0);
-    c.scale(-1, 1);
-  }
-  c.drawImage(video, 0, 0, vw, vh);
-  return stage;
-}
-
-/** center-crop a stage canvas to W×H via a source-rect draw (can't fail to cover) */
-function cropStage(stage, W, H) {
-  const out = document.createElement('canvas');
-  out.width = W; out.height = H;
-  const c = out.getContext('2d');
-  const vw = stage.width, vh = stage.height, AR = W / H;
-  let sw, sh;
-  if (vw / vh > AR) { sh = vh; sw = Math.min(vw, Math.round(vh * AR)); }
-  else { sw = vw; sh = Math.min(vh, Math.round(vw / AR)); }
-  const sx = (stage.width - sw) / 2;
-  const sy = (stage.height - sh) / 2;
-  c.drawImage(stage, sx, sy, sw, sh, 0, 0, W, H);
-  return out;
-}
-
-function torchAvailable() {
-  return !!state.videoTrack?.getCapabilities?.()?.torch;
-}
 
 async function torch(on) {
   const track = state.videoTrack;
@@ -162,8 +123,7 @@ function preflashOverlay() {
   fx.classList.add('fire');
 }
 
-function collectFlashPoints(W, H) {
-  // sample a downscaled frame to find hugely bright spots (lights, sun, mirrors)
+function collectFlashPoints() {
   const small = document.createElement('canvas');
   const sw = 160, sh = 120;
   small.width = sw; small.height = sh;
@@ -180,6 +140,73 @@ function collectFlashPoints(W, H) {
   return pick;
 }
 
+/*
+ * THE ACTUAL BUG HUNTED DOWN:
+ * drawImage(video) can hand us a PARTIALLY-DECODED frame. The lower
+ * scanlines of the video buffer may not be decoded yet at the exact
+ * moment we snapshot (this races especially right after a torch
+ * constraint toggles or the track renegotiates — i.e. booth shots 2 & 3).
+ * The canvas keeps those rows TRANSPARENT, and JPEG has no alpha:
+ * transparency encodes as BLACK. Top half = decoded. Bottom half = black.
+ *
+ * So we stop trusting the blit and MEASURE it: scan the freshly drawn
+ * canvas for transparent pixels, and if any region is unpainted, wait
+ * for the decoder to finish a full frame and re-blit (up to 4 times).
+ */
+function blitVideo() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const stage = document.createElement('canvas');
+  stage.width = vw; stage.height = vh;
+  const c = stage.getContext('2d', { willReadFrequently: true });
+  if (state.facing === 'user') {
+    c.translate(vw, 0);
+    c.scale(-1, 1);
+  }
+  c.drawImage(video, 0, 0, vw, vh);
+  return stage;
+}
+
+/** unpainted canvas rows are transparent — count them sparsely for speed */
+function stageIsComplete(stage) {
+  const c = stage.getContext('2d');
+  const img = c.getImageData(0, 0, stage.width, stage.height).data;
+  let transparent = 0, checked = 0;
+  for (let i = 3; i < img.length; i += 4 * 61) {   // every ~61st pixel
+    checked++;
+    if (img[i] < 250) transparent++;
+  }
+  return transparent / Math.max(1, checked) < 0.02;
+}
+
+async function grabFullFrame() {
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const stage = blitVideo();
+    if (stageIsComplete(stage)) {
+      if (attempt > 1) console.info(`[booth] frame decoded fully on attempt ${attempt}`);
+      return stage;
+    }
+    console.warn(`[booth] partial frame on attempt ${attempt} — waiting for decoder…`);
+    await sleep(140);   // let the video decoder finish a complete frame
+  }
+  console.error('[booth] frame never fully decoded after 4 attempts');
+  return blitVideo();   // best effort rather than nothing
+}
+
+/** center-crop a stage canvas to W×H via a source-rect draw (can't fail to cover) */
+function cropStage(stage, W, H) {
+  const out = document.createElement('canvas');
+  out.width = W; out.height = H;
+  const c = out.getContext('2d');
+  const vw = stage.width, vh = stage.height, AR = W / H;
+  let sw, sh;
+  if (vw / vh > AR) { sh = vh; sw = Math.min(vw, Math.round(vh * AR)); }
+  else { sw = vw; sh = Math.min(vh, Math.round(vw / AR)); }
+  const sx = (stage.width - sw) / 2;
+  const sy = (stage.height - sh) / 2;
+  c.drawImage(stage, sx, sy, sw, sh, 0, 0, W, H);
+  return out;
+}
+
 async function countdownTick(seconds) {
   const ov = $('countdown-display-overlay');
   const val = $('countdown-value');
@@ -187,61 +214,75 @@ async function countdownTick(seconds) {
   for (let s = seconds; s > 0; s--) {
     val.textContent = s;
     playTimerTick(false);
-    await new Promise((r) => setTimeout(r, 980));
+    await sleep(980);
   }
   ov.classList.add('hidden');
   playTimerTick(true);
 }
 
-async function doCapture() {
+/* ============================================================
+   photobooth session: 3 shots -> one paper card
+   ============================================================ */
+
+async function shootOne() {
+  const src = video;
+  if (!src.videoWidth || !src.videoHeight) throw new Error('camera not ready');
+
+  // the light IGNITES first and stays on through the grab
+  let torchOn = false;
+  if (state.flash) {
+    torchOn = await torch(true);
+    preflashOverlay();
+    await sleep(torchOn ? 300 : 150);
+  }
+
+  if (state.flash) flashOverlay();      // full-viewport white light
+  playShutter();
+  const stage = await grabFullFrame();  // grab (and VERIFY) while the light burns
+  if (torchOn) await torch(false);      // LED off only after capture
+
+  const { W, H } = computeOutputSize();
+  const raw = cropStage(stage, W, H);
+  toastOnce('torch', '本机没有硬件闪光灯 → 用了全屏白光补光 ✨');
+
+  return applyFilterToCanvas(raw, {
+    filterEntry: DIGI,
+    intensity: 100,
+    width: W, height: H,
+    mirror: false, // mirrored at grab time
+    starPoints: state.flash ? collectFlashPoints() : [],
+    timestampOverride: false, // the date lives on the paper card, not per-photo
+  });
+}
+
+function setProgress(n) {
+  const ov = $('shot-progress-overlay');
+  if (!n) { ov.classList.add('hidden'); return; }
+  $('shot-progress-text').textContent = `📸 快拍 ${n} / 3`;
+  ov.classList.remove('hidden');
+}
+
+async function captureSession() {
   if (state.busy || !state.stream) { if (!state.stream) toast('先把摄像头打开吧 ♥'); return; }
   state.busy = true;
   shutterBtn.classList.add('cooling');
 
   try {
-    // 0) camera ready?
-    const src = video;
-    if (!src.videoWidth || !src.videoHeight) {
-      toast('摄像头还没准备好，稍等一秒再按一次吧');
-      return;
+    const shots = [];
+    for (let n = 1; n <= 3; n++) {
+      setProgress(n);
+      await countdownTick(state.countdownSec);
+      shots.push(await shootOne());
+      setProgress(0);
+      if (n < 3) await sleep(700);
     }
 
-    // 1) optional countdown
-    if (state.countdownSec > 0) await countdownTick(state.countdownSec);
-
-    // 2) ignite the light FIRST and KEEP it burning through the grab
-    //    (this was the old bug: the LED was switched off before exposure)
-    let torchOn = false;
-    if (state.flash) {
-      torchOn = await torch(true);   // real hardware LED when the device has one
-      preflashOverlay();
-      await sleep(torchOn ? 320 : 170);
-    }
-
-    // 3) fire flash + shutter, grab the frame WHILE the light is still on
-    if (state.flash) flashOverlay(); // full-viewport white light
-    playShutter();
-    const stage = grabFullFrame();   // dead-simple 1:1 blit, cannot fail to cover
-    if (torchOn) await torch(false); // LED off only after the frame is captured
-
-    // 4) film lab
-    const fEntry = FILTERS[state.filterIdx];
-    const { W, H } = computeOutputSize();
-    const raw = cropStage(stage, W, H);
-    const out = applyFilterToCanvas(raw, {
-      filterEntry: fEntry,
-      intensity: state.intensity,
-      width: W, height: H,
-      mirror: false, // mirrored at grab time
-      starPoints: state.flash ? collectFlashPoints(W, H) : [],
-      timestampOverride: computeStamp(fEntry.params),
-    });
-
-    if (state.flash && !torchOn) toastOnce('torch', '本机没有硬件闪光灯 → 已用全屏白光补光 ✨');
-
-    showCapturedPreview(out, fEntry);
+    toast('三连拍完成，打印中… ♪');
+    const card = composeBoothCard(shots, new Date());
+    showCapturedPreview(card);
   } catch (err) {
     console.error(err);
+    setProgress(0);
     toast('哎呀，出了点技术问题… 🥲');
   } finally {
     state.busy = false;
@@ -249,40 +290,72 @@ async function doCapture() {
   }
 }
 
-const _toastOnceSet = new Set();
-function toastOnce(key, text) {
-  if (_toastOnceSet.has(key)) return;
-  _toastOnceSet.add(key);
-  toast(text);
+/**
+ * compose the photobooth print: off-white paper card, 3 photos stacked
+ * top to bottom, and the date stamped under the strip
+ */
+function composeBoothCard(shots, when) {
+  const PW = 720, PH = 540;                 // print cell
+  const PAD = 46, GAP = 22, FOOT = 120, TOP = 40;
+  const CW = PAD * 2 + PW;                  // paper width
+  const CH = TOP + PH * 3 + GAP * 2 + FOOT; // paper height
+  const card = document.createElement('canvas');
+  card.width = CW; card.height = CH;
+  const ctx = card.getContext('2d', { willReadFrequently: true });
+
+  // paper base (opaque — JPEG must never see transparency)
+  ctx.fillStyle = '#fffdf8';
+  ctx.fillRect(0, 0, CW, CH);
+
+  // faint print edge, like a minilab sheet
+  ctx.strokeStyle = 'rgba(196,156,132,0.4)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(18, 18, CW - 36, CH - 36);
+
+  // three shots, top to bottom, cover-fitted into cells
+  shots.forEach((shot, i) => {
+    const dy = TOP + i * (PH + GAP);
+    const s = Math.max(PW / shot.width, PH / shot.height);
+    const rW = shot.width * s, rH = shot.height * s;
+    ctx.drawImage(shot, PAD + (PW - rW) / 2, dy + (PH - rH) / 2, rW, rH);
+  });
+
+  // the date stamp at the bottom of the photobooth card
+  const p = (n) => String(n).padStart(2, '0');
+  const stamp = `${when.getFullYear()}.${p(when.getMonth() + 1)}.${p(when.getDate())}  ${p(when.getHours())}:${p(when.getMinutes())}`;
+  const size = 34;
+  ctx.font = `bold ${size}px "Courier New", Courier, monospace`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#c97b4e';
+  ctx.fillText(stamp, CW / 2, TOP + PH * 3 + GAP * 2 + FOOT / 2 + 6);
+
+  return card;
 }
 
-function showCapturedPreview(canvas, fEntry) {
-  state.pendingPhoto = canvas;
-  const ov = $('captured-photo-preview-overlay');
+/* preview + save/discard */
+function showCapturedPreview(canvas) {
   const img = $('captured-photo-img');
   canvas.toBlob((blob) => {
     const url = URL.createObjectURL(blob);
     img.src = url;
     img.dataset.blobUrl = url;
     state.pendingBlob = blob;
-    ov.classList.remove('hidden');
+    $('captured-photo-preview-overlay').classList.remove('hidden');
   }, 'image/jpeg', 0.93);
 }
 
-/* save / discard handlers */
 $('save-photo-btn').addEventListener('click', async () => {
   if (!state.pendingBlob) return;
-  const fEntry = FILTERS[state.filterIdx];
   try {
     await store.savePhoto(state.pendingBlob, {
-      filter: fEntry.id,
-      filterName: fEntry.name,
-      intensity: state.intensity,
+      filter: 'digicam',
+      filterName: '快拍三连',
       ts: Date.now(),
       aspect: state.aspect,
     });
     playSaved();
-    toast('藏进相册啦 ♥');
+    toast('收进相册啦 ♥');
   } catch (e) {
     console.error('save fail', e);
     toast('相册似乎满了？删一些照片再来试试。');
@@ -297,7 +370,6 @@ function closeCapturePreview() {
   const img = $('captured-photo-img');
   if (img.dataset.blobUrl) URL.revokeObjectURL(img.dataset.blobUrl);
   img.src = '';
-  state.pendingPhoto = null;
   state.pendingBlob = null;
 }
 
@@ -308,7 +380,7 @@ function closeCapturePreview() {
 async function refreshGallery() {
   try {
     state.photos = (await store.listPhotos()).sort((a, b) => b.meta.ts - a.meta.ts);
-  } catch (e) {
+  } catch {
     state.photos = [];
   }
   renderGallery();
@@ -321,34 +393,34 @@ function renderGallery() {
   grid.innerHTML = '';
   const all = state.photos;
 
-  // collections: all / by filter
-  const byFilter = {};
-  for (const p of all) (byFilter[p.meta.filter] ||= []).push(p);
-  const collections = [
-    { id: 'all', label: `全部 (${all.length})` },
-    ...FILTERS.map((f) => ({ id: f.id, label: `${f.name}` })),
-  ].map((c) => ({ ...c, count: c.id === 'all' ? all.length : (byFilter[c.id] || []).length }));
+  // collections: "all" + one per saved kind
+  const kinds = [{ id: 'all', label: `全部 (${all.length})` }];
+  const seen = new Map();
+  for (const ph of all) {
+    if (!seen.has(ph.meta.filter)) seen.set(ph.meta.filter, ph.meta.filterName);
+  }
+  for (const [id, label] of seen) kinds.push({ id, label });
 
   nav.innerHTML = '';
-  for (const c of collections) {
+  for (const k of kinds) {
     const b = document.createElement('button');
-    b.className = 'collection-btn' + (state.activeCollection === c.id ? ' active' : '');
-    b.textContent = c.label;
-    b.onclick = () => { state.activeCollection = c.id; renderGallery(); };
+    b.className = 'collection-btn' + (state.activeCollection === k.id ? ' active' : '');
+    b.textContent = k.label;
+    b.onclick = () => { state.activeCollection = k.id; renderGallery(); };
     nav.appendChild(b);
   }
 
   const list = state.activeCollection === 'all'
     ? all
-    : byFilter[state.activeCollection] || [];
+    : all.filter((ph) => ph.meta.filter === state.activeCollection);
 
   empty.classList.toggle('hidden', list.length > 0);
 
-  for (const [idx, p] of list.entries()) {
-    const url = URL.createObjectURL(p.blob);
-    const card = document.createElement('div');
-    card.className = 'photo-card';
-    card.style.setProperty('--tilt', `${(((idx * 37) % 7) - 3) * 0.8}deg`);
+  list.forEach((ph, idx) => {
+    const url = URL.createObjectURL(ph.blob);
+    const cardEl = document.createElement('div');
+    cardEl.className = 'photo-card';
+    cardEl.style.setProperty('--tilt', `${(((idx * 37) % 7) - 3) * 0.8}deg`);
 
     const img = new Image();
     img.src = url;
@@ -356,87 +428,44 @@ function renderGallery() {
 
     const meta = document.createElement('div');
     meta.className = 'meta';
-    const d = new Date(p.meta.ts);
+    const d = new Date(ph.meta.ts);
     const dateStr = `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
-    meta.innerHTML = `<span>♥ ${p.meta.filterName}</span><span style="display:flex;align-items:center;gap:6px"><span>${dateStr}</span><button class="delete-btn" title="删除">×</span></span>`;
+    meta.innerHTML = `<span>♥ ${ph.meta.filterName}</span><span style="display:flex;align-items:center;gap:6px"><span>${dateStr}</span><button class="delete-btn" title="删除">×</button></span>`;
 
-    card.appendChild(img);
-    card.appendChild(meta);
-
+    cardEl.appendChild(img);
+    cardEl.appendChild(meta);
     img.onload = () => URL.revokeObjectURL(url);
 
-    card.addEventListener('click', (e) => {
+    cardEl.addEventListener('click', (e) => {
       if (e.target.closest('.delete-btn')) return;
-      openLightbox(p);
+      openLightbox(ph);
     });
     meta.querySelector('.delete-btn').addEventListener('click', async () => {
-      await store.deletePhoto(p.id);
+      await store.deletePhoto(ph.id);
       refreshGallery();
       toast('删掉啦');
     });
 
-    grid.appendChild(card);
-  }
+    grid.appendChild(cardEl);
+  });
 }
 
 /* lightbox */
 function openLightbox(photo) {
-  const ov = $('lightbox-overlay');
   store.blobToDataURL(photo.blob).then((url) => {
     $('lightbox-img').src = url;
     const dl = $('lightbox-download-btn');
     dl.href = url;
     const d = new Date(photo.meta.ts);
     const p = (n) => String(n).padStart(2, '0');
-    dl.download = `naxiesian_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}.jpg`;
+    dl.download = `digibooth_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}.jpg`;
   });
-  ov.classList.remove('hidden');
+  $('lightbox-overlay').classList.remove('hidden');
 }
 $('lightbox-close-btn').addEventListener('click', () => $('lightbox-overlay').classList.add('hidden'));
 $('lightbox-overlay').addEventListener('click', (e) => {
   if (e.target.id === 'lightbox-overlay') $('lightbox-overlay').classList.add('hidden');
 });
-
-/* ============================================================
-   filter strip (top-left of viewfinder, floating chips)
-   ============================================================ */
-
-function buildFilterStrip() {
-  const holder = document.createElement('div');
-  holder.id = 'filter-strip';
-  holder.style.cssText = 'position:absolute;left:12px;top:12px;z-index:5;display:flex;flex-direction:column;gap:8px;';
-  for (const [i, f] of FILTERS.entries()) {
-    const b = document.createElement('button');
-    b.className = 'filter-chip' + (i === 0 ? ' active' : '');
-    b.innerHTML = `<span class="zh">${f.name}</span><span class="en">${f.en}</span>`;
-    b.onclick = () => selectFilter(i);
-    holder.appendChild(b);
-  }
-  const intensity = document.createElement('div');
-  intensity.className = 'intensity-slider';
-  intensity.innerHTML = `<label>强度</label><input type="range" min="0" max="200" value="100" id="intensity-range">`;
-  holder.appendChild(intensity);
-  viewfinderScreen.appendChild(holder);
-
-  $('intensity-range').addEventListener('input', (e) => {
-    state.intensity = +e.target.value;
-    // live preview via CSS approximation
-    const k = state.intensity / 100;
-    video.style.filter = `saturate(${1 + 0.08 * k}) contrast(${1 + 0.03 * k}) brightness(${1 + 0.04 * k})`;
-  });
-}
-
-function selectFilter(i) {
-  state.filterIdx = i;
-  document.querySelectorAll('.filter-chip').forEach((c, j) => c.classList.toggle('active', j === i));
-  const f = FILTERS[i];
-  const k = state.intensity / 100;
-  const bright = 1 + (f.params.brightness / 180) * k;
-  const contrast = 1 + (f.params.contrast / 400) * k;
-  const sat = 1 + (f.params.saturation / 200) * k + (f.params.warmth / 500) * k;
-  video.style.filter = `saturate(${sat.toFixed(2)}) contrast(${contrast.toFixed(2)}) brightness(${bright.toFixed(2)})`;
-  toast(`滤镜：${f.name} — ${f.desc}`);
-}
 
 /* ============================================================
    mode switching (photo / gallery / about)
@@ -446,24 +475,12 @@ modeSwitcher.addEventListener('click', (e) => {
   if (!label) return;
   const mode = label.dataset.mode;
   modeSwitcher.querySelectorAll('.mode-label').forEach((m) => m.classList.toggle('active', m === label));
-  showOnlySection(mode);
-  if (mode === 'gallery') refreshGallery();
-});
-
-const shutterHUD = $('shutter-hud');
-
-function showOnlySection(mode) {
-  // small helper used by clicking mode switcher
   viewfinderScreen.classList.toggle('hidden', mode !== 'photo');
   galleryScreen.classList.toggle('hidden', mode !== 'gallery');
   aboutScreen.classList.toggle('hidden', mode !== 'about');
   shutterHUD.classList.toggle('hidden', mode !== 'photo');
-}
-
-/* the click handler above manually shows one section; make sure it hides others */
-/* (mode switching is handled entirely above) */
-
-
+  if (mode === 'gallery') refreshGallery();
+});
 
 /* ============================================================
    hud toggles
@@ -484,36 +501,7 @@ $('countdown-selector').addEventListener('click', () => {
   el.dataset.countdown = next;
   state.countdownSec = +next;
   el.querySelector('span').textContent = next === '0' ? '即时' : `延时${next}s`;
-  toast(next === '0' ? '即时拍摄，冲呀 ♥' : `延时 ${next} 秒`);
-});
-
-/* timestamp stamp: auto (per-filter) / off / real amd / fixed 2006 digicam */
-const TS_MODES = [
-  { id: 'auto', label: '戳·自动' },
-  { id: 'now', label: '戳·此刻' },
-  { id: '2006', label: `戳·'06` },
-  { id: 'off', label: '戳·关' },
-];
-
-function computeStamp(pr) {
-  const mode = state.timestampMode;
-  if (mode === 'off') return false;
-  if (mode === 'now') return TIMESTAMP_DEFAULT();
-  if (mode === '2006') return `'06 ` + TIMESTAMP_DEFAULT().slice(5); // keep month/day/time
-  // auto: whatever the film recipe wants
-  if (pr.timestamp === true) return TIMESTAMP_DEFAULT();
-  return pr.timestamp ? pr.timestamp : false;
-}
-
-$('timestamp-selector').addEventListener('click', () => {
-  const el = $('timestamp-selector');
-  const ids = TS_MODES.map((m) => m.id);
-  const nextMode = ids[(ids.indexOf(state.timestampMode) + 1) % ids.length];
-  state.timestampMode = nextMode;
-  el.dataset.tsMode = nextMode;
-  el.querySelector('.ts-label').textContent = TS_MODES.find((m) => m.id === nextMode).label;
-  const note = { auto: '由滤镜决定', now: '拍下真实的此刻', 2006: `时间永远停在 '06 某个瞬间`, off: '不盖章' }[nextMode];
-  toast(`时间戳：${note}`);
+  toast(next === '0' ? '风一样的三连拍 ♥' : `每张延时 ${next} 秒`);
 });
 
 $('camera-switcher').addEventListener('click', () => {
@@ -543,13 +531,13 @@ $('mute-toggle').addEventListener('click', () => {
 
 $('retry-camera-btn').addEventListener('click', () => openCamera());
 
-shutterBtn.addEventListener('click', doCapture);
+shutterBtn.addEventListener('click', captureSession);
 
 document.addEventListener('keydown', (e) => {
   if (e.code === 'Space' && !$('viewfinder-screen').classList.contains('hidden')
       && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
     e.preventDefault();
-    doCapture();
+    captureSession();
   }
 });
 
@@ -565,9 +553,15 @@ function toast(text) {
   setTimeout(() => t.remove(), 2600);
 }
 
+const _toastOnceSet = new Set();
+function toastOnce(key, text) {
+  if (_toastOnceSet.has(key)) return;
+  _toastOnceSet.add(key);
+  toast(text);
+}
+
 /* ============================================================
    intro
    ============================================================ */
-buildFilterStrip();
 openCamera();
-console.log('♥ naxiesian cam ready');
+console.log('♥ digibooth ready — one look, three shots, one paper card');

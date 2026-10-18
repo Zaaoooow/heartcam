@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>那些年 · 拍立得小站</title>
+<title>那些年 · 快拍三连</title>
 <link rel="stylesheet" href="styles.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -24,6 +24,8 @@
     </div>
   </header>
 
+  <div id="tagline">③ 连拍 ▸ 相纸卡打印 ▸ 底部盖日期章</div>
+
   <main>
     <section id="viewfinder-screen">
       <video id="camera-feed" playsinline autoplay muted></video>
@@ -43,6 +45,7 @@
         <span class="grid-line-h"></span><span class="grid-line-h"></span>
       </div>
       <div id="countdown-display-overlay" class="hidden"><span id="countdown-value">3</span></div>
+      <div id="shot-progress-overlay" class="hidden"><span id="shot-progress-text">📸 快拍 1 / 3</span></div>
       <div id="flash-effect-overlay"></div>
       <div id="pre-flash-effect-overlay"></div>
     </section>
@@ -56,10 +59,6 @@
         <label id="countdown-selector" class="hud-pill" title="切换延时拍摄" data-countdown="3">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><circle cx="12" cy="13" r="7"/><path d="M12 9v4l2.5 2" stroke="#fff" stroke-width="1.6" fill="none"/><path d="M9 2h6v3H9z"/></svg>
           <span>延时</span>
-        </label>
-        <label id="timestamp-selector" class="hud-pill" title="切换时间戳" data-ts-mode="auto">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 9h18" stroke="#fff" stroke-width="1.6"/><path d="M8 3v4M16 3v4" stroke="#fff" stroke-width="1.6"/></svg>
-          <span class="ts-label">戳·自动</span>
         </label>
       </div>
       <button id="shutter-button" aria-label="拍照">
@@ -92,11 +91,11 @@
   <section id="about-screen" class="hidden">
     <h2 class="section-title"><span class="accent">♥</span> 关于小站</h2>
     <div class="about-card">
-      <p>「那些年」是一个纯前端的怀旧风美式 digicam / 青春剧同款滤镜拍照小站：</p>
+      <p>「那些年 · 快拍三连」是一台纯前端的怀旧风数码快拍机 —— 只有一种 2006 年手持感 digicam 滤镜：</p>
       <ul>
-        <li>真实感 CCD 噪点 ( RAW → JPEG 流水线 )</li>
-            <li>青春剧同款「星芒」「halation」「溢光」一齐起飞</li>
-            <li>拍立得相纸 / 即拍即看 / 一键保存</li>
+        <li>按下快门 = 连拍 3 张（延时 + 闪光灯各自控制）</li>
+            <li>自动打印「美白相纸卡」：3 张照片纵向排列，最底部盖上日期章</li>
+            <li>照片卡收进相册（IndexedDB），可一键下载原图</li>
       </ul>
       <p class="footer-note">所有照片都保存在你自己的浏览器里，不会上传。<br>今天也要开心呀 ♥</p>
     </div>
@@ -106,7 +105,7 @@
 <div id="captured-photo-preview-overlay" class="hidden">
   <div id="captured-photo-card">
     <img id="captured-photo-img" src="">
-    <div class="caption-bar">刚刚拍下的回忆 ♥</div>
+    <div class="caption-bar">三连拍完成，收好这张纸 ♥</div>
     <div class="photo-actions">
       <button id="save-photo-btn" class="pretty-button">保存到相册</button>
       <button id="discard-photo-btn" class="pretty-button subtle">不要啦</button>
