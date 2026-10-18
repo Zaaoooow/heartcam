@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>那些年 · 拍立得小站</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&family=Zhi+Mang+Xing&family=Noto+Serif+SC:wght@400;600&display=swap" rel="stylesheet">
+<script type="module" src="scripts/app.js" defer></script>
+</head>
+<body>
+
+<div id="viewfinder-container">
+  <header id="top-bar">
+    <div id="album-navigation" class="nav-cluster"></div>
+    <div id="viewfinder-mode-switcher">
+      <span class="mode-label active" data-mode="photo">拍照</span><span class="mode-sep">丨</span><span class="mode-label" data-mode="gallery">相册</span><span class="mode-sep">丨</span><span class="mode-label" data-mode="about">关于</span>
+    </div>
+    <div id="top-right-icons">
+      <button id="grid-overlay-toggle" aria-label="切换九宫格" title="切换九宫格">⊞</button>
+      <button id="mute-toggle" aria-label="切换静音" title="切换静音">🔊</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="viewfinder-screen">
+      <video id="camera-feed" playsinline autoplay muted></video>
+      <div id="camera-loading-overlay" class="screen-overlay-message">
+        <div class="cute-icon">♡</div>
+        <h4>请求摄像头权限…</h4>
+        <p>浏览器需要你的同意才能开始取景哦。<br>如果已拒绝，请到浏览器地址栏的权限设置里重新允许。</p>
+      </div>
+      <div id="camera-error-overlay" class="screen-overlay-message hidden">
+        <div class="cute-icon">☁</div>
+        <h4>取景失败</h4>
+        <p id="camera-error-message">出现了一点问题，请检查摄像头再试试看。</p>
+        <button id="retry-camera-btn" class="pretty-button">再试一次</button>
+      </div>
+      <div id="viewfinder-grid-lines" class="hidden">
+        <span class="grid-line-v"></span><span class="grid-line-v"></span>
+        <span class="grid-line-h"></span><span class="grid-line-h"></span>
+      </div>
+      <div id="countdown-display-overlay" class="hidden"><span id="countdown-value">3</span></div>
+      <div id="flash-effect-overlay"></div>
+      <div id="pre-flash-effect-overlay"></div>
+    </section>
+
+    <div id="shutter-hud">
+      <div id="hud-left">
+        <label id="flash-selector" class="hud-pill" title="切换闪光灯模式" data-flash-state="on">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7 2h11l-3 7h4L8 23l2.5-9H7z"/></svg>
+          <span>闪光</span>
+        </label>
+        <label id="countdown-selector" class="hud-pill" title="切换延时拍摄" data-countdown="3">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><circle cx="12" cy="13" r="7"/><path d="M12 9v4l2.5 2" stroke="#fff" stroke-width="1.6" fill="none"/><path d="M9 2h6v3H9z"/></svg>
+          <span>延时</span>
+        </label>
+        <label id="timestamp-selector" class="hud-pill" title="切换时间戳" data-ts-mode="auto">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 9h18" stroke="#fff" stroke-width="1.6"/><path d="M8 3v4M16 3v4" stroke="#fff" stroke-width="1.6"/></svg>
+          <span class="ts-label">戳·自动</span>
+        </label>
+      </div>
+      <button id="shutter-button" aria-label="拍照">
+        <div class="shutter-inner"></div>
+      </button>
+      <div id="hud-right">
+        <label id="camera-switcher" class="hud-pill" title="翻转镜头">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 5a7 7 0 016.9 6H21l-3.5 4L14 11h2.8A5 5 0 007 12.9L5.4 14A7 7 0 0112 5z"/></svg>
+          <span>翻转</span>
+        </label>
+        <label id="aspect-selector" class="hud-pill" title="切换画幅">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><rect x="3" y="6" width="18" height="12" rx="1.5"/></svg>
+          <span id="aspect-ratio-label">4:3</span>
+        </label>
+      </div>
+    </div>
+  </main>
+
+  <section id="gallery-screen" class="hidden">
+    <h2 class="section-title"><span class="accent">♥</span> 我的相册</h2>
+    <div id="gallery-navigation" class="nav-cluster"></div>
+    <div id="gallery-grid"></div>
+    <div id="gallery-empty-state" class="hidden screen-overlay-message">
+      <div class="cute-icon">📷</div>
+      <h4>相册里空空的</h4>
+      <p>快去拍点照片存进来吧 ♥</p>
+    </div>
+  </section>
+
+  <section id="about-screen" class="hidden">
+    <h2 class="section-title"><span class="accent">♥</span> 关于小站</h2>
+    <div class="about-card">
+      <p>「那些年」是一个纯前端的怀旧风美式 digicam / 青春剧同款滤镜拍照小站：</p>
+      <ul>
+        <li>真实感 CCD 噪点 ( RAW → JPEG 流水线 )</li>
+            <li>青春剧同款「星芒」「halation」「溢光」一齐起飞</li>
+            <li>拍立得相纸 / 即拍即看 / 一键保存</li>
+      </ul>
+      <p class="footer-note">所有照片都保存在你自己的浏览器里，不会上传。<br>今天也要开心呀 ♥</p>
+    </div>
+  </section>
+</div>
+
+<div id="captured-photo-preview-overlay" class="hidden">
+  <div id="captured-photo-card">
+    <img id="captured-photo-img" src="">
+    <div class="caption-bar">刚刚拍下的回忆 ♥</div>
+    <div class="photo-actions">
+      <button id="save-photo-btn" class="pretty-button">保存到相册</button>
+      <button id="discard-photo-btn" class="pretty-button subtle">不要啦</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast-container"></div>
+<div id="lightbox-overlay" class="hidden">
+  <img id="lightbox-img" src="">
+  <div class="lightbox-actions">
+    <a id="lightbox-download-btn" class="pretty-button" download>下载原图</a>
+    <button id="lightbox-close-btn" class="pretty-button subtle">关闭</button>
+  </div>
+</div>
+</body>
+</html>
