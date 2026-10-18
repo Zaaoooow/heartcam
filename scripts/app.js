@@ -4,11 +4,10 @@
    EN / 中文 switchable
    ============================================================ */
 
-import { FILTERS, applyFilterToCanvas } from './filters.js?v=7';
-import * as store from './storage.js?v=7';
-import { playShutter, playTimerTick, playSaved, setMuted, muted } from './audio.js?v=7';
+import * as store from './storage.js?v=8';
+import { playShutter, playTimerTick, playSaved, setMuted, muted } from './audio.js?v=8';
 
-const BUILD = 'v7';
+const BUILD = "v8";
 
 /* ============================================================
    i18n — English / 中文
@@ -36,7 +35,7 @@ const LANGS = {
     album_title: '我的相册',
     album_empty_h4: '相册里空空的', album_empty_p: '快去拍点照片存进来吧 ♥',
     about_title: '关于小站',
-    about_p1: '「那些年 · 快拍三连」是一台纯前端的怀旧风数码快拍机 —— <b>RAW 原图</b> 直接输出摄像头画面（零处理），<b>2006 DIGICAM</b> 套上 CCD 噪点、暖调、闪光感的怀旧配方：',
+    about_p1: '「那些年 · 快拍三连」是一台纯前端的怀旧风数码快拍机 —— 画面零处理，所见即所拍：',
     about_li1: '按一次快门 = 连拍 3 张（延时、闪光灯各自控制）',
     about_li2: '自动打印「相纸卡」：3 张照片纵向排列，最底部盖上日期章',
     about_li3: '照片卡收进相册（IndexedDB），可一键下载原图',
@@ -79,7 +78,7 @@ const LANGS = {
     album_title: 'My album',
     album_empty_h4: 'The album is empty', album_empty_p: 'Go take some photos and save them here ♥',
     about_title: 'About',
-    about_p1: 'A nostalgic digibooth that runs entirely in your browser — <b>RAW</b> hands you the camera frame untouched (zero processing), while <b>2006 DIGICAM</b> adds CCD noise, warmth and flash-era colour:',
+    about_p1: 'A nostalgic digibooth running entirely in your browser — zero pixel processing, what you see is what the camera saw:',
     about_li1: 'One shutter press = 3 shots (timer and flash each control theirs)',
     about_li2: 'They print as a photobooth card: three photos stacked top to bottom, date stamped under the strip',
     about_li3: 'Cards are kept in your album (IndexedDB) — download the full print anytime',
@@ -120,17 +119,7 @@ function applyLang() {
   document.querySelectorAll('[data-i18n-title]').forEach((el) => { el.title = t(el.dataset.i18nTitle); });
   $('lang-toggle').textContent = lang === 'zh' ? 'EN' : '中';
   refreshDynamicText();
-  renderFilterSwitch();
 }
-
-/* ============================================================
-   capture modes: RAW (zero processing) | 2006 DIGICAM (film lab)
-   ============================================================ */
-const MODES = {
-  digicam: { id: 'digicam', entry: FILTERS.find((f) => f.id === 'digicam') || FILTERS[0], raw: false },
-  raw: { id: 'raw', entry: null, raw: true },
-};
-const MODE_ORDER = ['digicam', 'raw'];
 
 /* -------------- state -------------- */
 const state = {
@@ -140,7 +129,6 @@ const state = {
   flash: true,
   countdownSec: 3,
   aspect: '4:3',
-  filterId: 'digicam',
   busy: false,
   photos: [],
   activeCollection: 'all',
@@ -157,10 +145,6 @@ const viewfinderScreen = $('viewfinder-screen');
 const shutterBtn = $('shutter-button');
 const toastBox = $('toast-container');
 const shutterHUD = $('shutter-hud');
-
-function currentMode() { return MODES[state.filterId] || MODES.digicam; }
-function modeLabel(id) { return id === 'raw' ? t('f_raw') : t('f_digi'); }
-function modeSub(id) { return id === 'raw' ? t('f_raw_en') : t('f_digi_en'); }
 
 /* ============================================================
    camera
@@ -246,23 +230,6 @@ function preflashOverlay() {
   fx.classList.add('fire');
 }
 
-function collectFlashPoints() {
-  const small = document.createElement('canvas');
-  const sw = 160, sh = 120;
-  small.width = sw; small.height = sh;
-  const sctx = small.getContext('2d', { willReadFrequently: true });
-  sctx.drawImage(video, 0, 0, sw, sh);
-  const d = sctx.getImageData(0, 0, sw, sh).data;
-  const pts = [];
-  for (let i = 0; i < d.length; i += 4) {
-    const b = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-    if (b > 242) pts.push([((i / 4) % sw) / sw, Math.floor((i / 4) / sw) / sh]);
-  }
-  const pick = [];
-  for (let i = 0; i < pts.length && pick.length < 8; i += Math.max(1, Math.floor(pts.length / 8) + 1)) pick.push(pts[i]);
-  return pick;
-}
-
 function blitVideo() {
   const vw = video.videoWidth, vh = video.videoHeight;
   const stage = document.createElement('canvas');
@@ -338,6 +305,13 @@ function cropStage(stage, W, H) {
   return out;
 }
 
+/* guard on the finished shot: nothing half-black reaches the paper card */
+function verifyFullFrame(canvas) {
+  const W = canvas.width, H = canvas.height;
+  const d = canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data;
+  return bandLooksAlive(d, W, H);
+}
+
 async function countdownTick(seconds) {
   const ov = $('countdown-display-overlay');
   const val = $('countdown-value');
@@ -352,7 +326,14 @@ async function countdownTick(seconds) {
 }
 
 /* ============================================================
-   one shot
+   one shot — ZERO pixel processing.
+
+   The film lab was removed here on purpose: its per-pixel stages
+   (noise injection, YCbCr chroma reconstruction) could write NaN into
+   a Uint8ClampedArray, which stores as 0 — a black band. A photo is
+   now exactly what the camera saw: blit -> aspect crop -> print.
+   Future looks will use CSS filters or WebGL (GPU-composited), which
+   never round-trip pixels through JS.
    ============================================================ */
 async function shootOne() {
   const src = video;
@@ -370,54 +351,8 @@ async function shootOne() {
   const stage = await grabFullFrame();
   if (torchOn) await torch(false);
 
-  const mode = currentMode();
   const { W, H } = computeOutputSize();
-  const raw = cropStage(stage, W, H);
-
-  // RAW mode: hand back the capture untouched — zero pixel processing
-  if (mode.raw) return raw;
-
-  toastOnce('torch', t('t_noTorch'));
-  const shot = applyFilterToCanvas(raw, {
-    filterEntry: mode.entry,
-    intensity: 100,
-    width: W, height: H,
-    mirror: false,
-    starPoints: state.flash ? collectFlashPoints() : [],
-    timestampOverride: false,
-  });
-  return verifyFullFrame(shot) ? shot : rebuildExact(raw, W, H, mode);
-}
-
-function verifyFullFrame(canvas) {
-  const W = canvas.width, H = canvas.height;
-  const d = canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data;
-  return bandLooksAlive(d, W, H);
-}
-
-function copyExact(srcCanvas, W, H) {
-  const out = document.createElement('canvas');
-  out.width = W; out.height = H;
-  const octx = out.getContext('2d', { willReadFrequently: true });
-  octx.putImageData(
-    srcCanvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H),
-    0, 0,
-  );
-  return out;
-}
-
-function rebuildExact(raw, W, H, mode) {
-  console.warn('[booth] pipeline output incomplete — rebuilding pixel-exact');
-  const base = copyExact(raw, W, H);
-  const out = applyFilterToCanvas(base, {
-    filterEntry: mode.entry,
-    intensity: 100,
-    width: W, height: H,
-    mirror: false,
-    starPoints: [],
-    timestampOverride: false,
-  });
-  return verifyFullFrame(out) ? out : base;
+  return cropStage(stage, W, H);
 }
 
 /* ============================================================
@@ -513,8 +448,8 @@ $('save-photo-btn').addEventListener('click', async () => {
   if (!state.pendingBlob) return;
   try {
     await store.savePhoto(state.pendingBlob, {
-      filter: state.filterId,
-      filterName: modeLabel(state.filterId),
+      filter: 'capture',
+      filterName: lang === 'zh' ? '原图' : 'RAW',
       ts: Date.now(),
       aspect: state.aspect,
     });
@@ -629,31 +564,6 @@ $('lightbox-overlay').addEventListener('click', (e) => {
 });
 
 /* ============================================================
-   filter switch (RAW <-> DIGICAM)
-   ============================================================ */
-function renderFilterSwitch() {
-  const holder = $('filter-switch');
-  if (!holder) return;
-  holder.innerHTML = '';
-  for (const id of MODE_ORDER) {
-    const b = document.createElement('button');
-    b.className = 'filter-chip' + (state.filterId === id ? ' active' : '');
-    b.innerHTML = `<span class="zh">${modeLabel(id)}</span><span class="en">${modeSub(id)}</span>`;
-    b.onclick = () => selectFilter(id);
-    holder.appendChild(b);
-  }
-}
-
-function selectFilter(id) {
-  state.filterId = id;
-  renderFilterSwitch();
-  // live preview hint only; RAW is the untouched frame by definition
-  if (id === 'raw') video.style.filter = 'none';
-  else video.style.filter = '';
-  toast(t('t_filter_fmt', { n: modeLabel(id) }));
-}
-
-/* ============================================================
    mode switching (photo / album / about)
    ============================================================ */
 modeSwitcher.addEventListener('click', (e) => {
@@ -766,4 +676,4 @@ function toastOnce(key, text) {
 $('build-badge').textContent = `build ${BUILD}`;
 applyLang();
 openCamera();
-console.log(`♥ digibooth ${BUILD} — RAW / 2006 DIGICAM — three shots, one paper card`);
+console.log(`♥ digibooth ${BUILD} — zero pixel processing — three shots, one paper card`);
